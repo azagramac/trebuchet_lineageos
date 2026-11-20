@@ -665,6 +665,7 @@ protobuf {
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        freeCompilerArgs.add("-Xnullability-annotations=@android.annotation:ignore")
     }
 }
 
@@ -695,7 +696,7 @@ gradle.projectsEvaluated {
     tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
         dependsOn(generateAospCompatSources, prepareSystemUiSources, prepareSystemUiResources)
         val orig = libraries.from.toList()
-        libraries.setFrom(orig, hiddenApiCompileOnly)
+        libraries.setFrom(hiddenApiCompileOnly, orig)
     }
 }
 
