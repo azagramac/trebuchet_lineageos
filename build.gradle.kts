@@ -263,6 +263,8 @@ val prepareSystemUiSources by tasks.registering {
         )
 
         val rImportRegex = Regex("""import\s+(com\.android\.launcher3\.icons|com\.android\.app\.animation|com\.android\.systemui\.animation|com\.android\.app\.viewcapture|com\.google\.android\.msdl)\.R(\s*;?)""")
+        val rRefRegex = Regex("""\bR\.""")
+        val pkgRegex = Regex("""^(\s*package\s+([^\s;]+)\s*;?\s*)$""", RegexOption.MULTILINE)
 
         moduleSrcDirs.filter { it.exists() }.forEach { srcRoot ->
             srcRoot.walkTopDown().filter { it.isFile && (it.extension == "java" || it.extension == "kt") }.forEach { srcFile ->
@@ -272,8 +274,15 @@ val prepareSystemUiSources by tasks.registering {
                     existingRelPaths.add(key)
                     val dest = File(outDir, rel)
                     dest.parentFile.mkdirs()
-                    val rewritten = srcFile.readText().replace(rImportRegex) { m ->
+                    var rewritten = srcFile.readText().replace(rImportRegex) { m ->
                         "import com.android.launcher3.R${m.groupValues[2]}"
+                    }
+                    if (!rewritten.contains("import com.android.launcher3.R") && rRefRegex.containsMatchIn(rewritten)) {
+                        val pkgMatch = pkgRegex.find(rewritten)
+                        if (pkgMatch != null && pkgMatch.groupValues[2] != "com.android.launcher3") {
+                            val semi = if (srcFile.extension == "java") ";" else ""
+                            rewritten = rewritten.replaceFirst(pkgMatch.groupValues[1], "${pkgMatch.groupValues[1]}\n\nimport com.android.launcher3.R$semi")
+                        }
                     }
                     dest.writeText(rewritten)
                 }
@@ -686,7 +695,7 @@ gradle.projectsEvaluated {
     tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
         dependsOn(generateAospCompatSources, prepareSystemUiSources, prepareSystemUiResources)
         val orig = libraries.from.toList()
-        libraries.setFrom(hiddenApiCompileOnly, orig)
+        libraries.setFrom(orig, hiddenApiCompileOnly)
     }
 }
 
