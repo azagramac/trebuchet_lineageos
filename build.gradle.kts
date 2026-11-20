@@ -1,5 +1,12 @@
 import com.google.protobuf.gradle.id
 import java.io.File
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.OutputKeys
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
+import org.w3c.dom.Element
+import org.w3c.dom.Node
 
 plugins {
     id("com.android.application") version "8.10.1"
@@ -17,6 +24,7 @@ val systemUiRepoDir = file("systemui-libs")
 val mergedProtosDir = layout.buildDirectory.dir("generated/merged-protos")
 val generatedAospCompatDir = layout.buildDirectory.dir("generated/source/aospCompat")
 val generatedSystemUiSrcDir = layout.buildDirectory.dir("generated/source/systemuiLibs")
+val generatedSystemUiResDir = layout.buildDirectory.dir("generated/res/systemuiLibs")
 
 val hiddenApiCompileOnly: Configuration by configurations.creating
 
@@ -33,6 +41,156 @@ val syncSystemUiLibs by tasks.registering {
             val exit = process.waitFor()
             if (exit != 0) {
                 throw GradleException("Failed to clone LineageOS/android_frameworks_libs_systemui (exit $exit)")
+            }
+        }
+    }
+}
+
+val prepareSystemUiResources by tasks.registering {
+    dependsOn(syncSystemUiLibs)
+    outputs.dir(generatedSystemUiResDir)
+    doLast {
+        val outDir = generatedSystemUiResDir.get().asFile
+        outDir.deleteRecursively()
+        outDir.mkdirs()
+
+        fun normalizeValueType(el: Element): String {
+            val tag = el.tagName
+            return when (tag) {
+                "item" -> el.getAttribute("type").ifBlank { "item" }
+                "string-array", "integer-array", "array" -> "array"
+                else -> tag
+            }
+        }
+
+        val definedValues = mutableSetOf<Pair<String, String>>()
+        val definedAttrs = mutableSetOf<String>()
+        val definedFiles = mutableSetOf<Pair<String, String>>()
+
+        val dbf = DocumentBuilderFactory.newInstance()
+        val mainRes = file("res")
+        if (mainRes.exists()) {
+            mainRes.listFiles()?.filter { it.isDirectory }?.forEach { subDir ->
+                val typePrefix = subDir.name.substringBefore("-")
+                if (typePrefix == "values") {
+                    subDir.listFiles()?.filter { it.isFile && it.extension == "xml" }?.forEach { xmlFile ->
+                        runCatching {
+                            val doc = dbf.newDocumentBuilder().parse(xmlFile)
+                            val root = doc.documentElement
+                            val children = root.childNodes
+                            for (i in 0 until children.length) {
+                                val node = children.item(i)
+                                if (node is Element) {
+                                    val name = node.getAttribute("name")
+                                    if (name.isNotBlank()) {
+                                        val vType = normalizeValueType(node)
+                                        definedValues.add(vType to name)
+                                        if (vType == "attr") definedAttrs.add(name)
+                                    }
+                                    if (node.tagName == "declare-styleable") {
+                                        val inner = node.childNodes
+                                        for (j in 0 until inner.length) {
+                                            val innerNode = inner.item(j)
+                                            if (innerNode is Element && innerNode.tagName == "attr") {
+                                                val attrName = innerNode.getAttribute("name")
+                                                if (attrName.isNotBlank()) {
+                                                    definedAttrs.add(attrName)
+                                                    definedValues.add("attr" to attrName)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    subDir.listFiles()?.filter { it.isFile }?.forEach { resFile ->
+                        val baseName = resFile.name.substringBefore(".")
+                        definedFiles.add(typePrefix to baseName)
+                    }
+                }
+            }
+        }
+
+        val moduleResDirs = listOf(
+            "iconloader" to File(systemUiRepoDir, "iconloaderlib/res"),
+            "animation" to File(systemUiRepoDir, "animationlib/res"),
+            "viewcapture" to File(systemUiRepoDir, "viewcapturelib/res"),
+        )
+
+        val tf = TransformerFactory.newInstance()
+        moduleResDirs.filter { it.second.exists() }.forEach { (prefix, resRoot) ->
+            resRoot.listFiles()?.filter { it.isDirectory }?.forEach { subDir ->
+                val typePrefix = subDir.name.substringBefore("-")
+                if (typePrefix == "values") {
+                    subDir.listFiles()?.filter { it.isFile && it.extension == "xml" }?.forEach { xmlFile ->
+                        runCatching {
+                            val doc = dbf.newDocumentBuilder().parse(xmlFile)
+                            val root = doc.documentElement
+                            val toRemove = mutableListOf<Node>()
+                            var keptCount = 0
+                            val children = root.childNodes
+                            for (i in 0 until children.length) {
+                                val node = children.item(i)
+                                if (node is Element) {
+                                    val name = node.getAttribute("name")
+                                    val vType = normalizeValueType(node)
+                                    if (name.isNotBlank() && (vType to name) in definedValues) {
+                                        toRemove.add(node)
+                                    } else {
+                                        if (name.isNotBlank()) {
+                                            definedValues.add(vType to name)
+                                            if (vType == "attr") definedAttrs.add(name)
+                                        }
+                                        if (node.tagName == "declare-styleable") {
+                                            val inner = node.childNodes
+                                            for (j in 0 until inner.length) {
+                                                val innerNode = inner.item(j)
+                                                if (innerNode is Element && innerNode.tagName == "attr") {
+                                                    val attrName = innerNode.getAttribute("name")
+                                                    if (attrName in definedAttrs) {
+                                                        innerNode.removeAttribute("format")
+                                                        while (innerNode.hasChildNodes()) {
+                                                            innerNode.removeChild(innerNode.firstChild)
+                                                        }
+                                                    } else if (attrName.isNotBlank()) {
+                                                        definedAttrs.add(attrName)
+                                                        definedValues.add("attr" to attrName)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        keptCount++
+                                    }
+                                }
+                            }
+                            toRemove.forEach { root.removeChild(it) }
+                            if (keptCount > 0) {
+                                val destDir = File(outDir, subDir.name)
+                                destDir.mkdirs()
+                                val destFile = File(destDir, "${prefix}_${xmlFile.name}")
+                                val transformer = tf.newTransformer().apply {
+                                    setOutputProperty(OutputKeys.INDENT, "yes")
+                                }
+                                destFile.outputStream().use { outStream ->
+                                    transformer.transform(DOMSource(doc), StreamResult(outStream))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    subDir.listFiles()?.filter { it.isFile }?.forEach { resFile ->
+                        val baseName = resFile.name.substringBefore(".")
+                        val key = typePrefix to baseName
+                        if (key !in definedFiles) {
+                            definedFiles.add(key)
+                            val destDir = File(outDir, subDir.name)
+                            destDir.mkdirs()
+                            resFile.copyTo(File(destDir, resFile.name), overwrite = true)
+                        }
+                    }
+                }
             }
         }
     }
@@ -280,13 +438,7 @@ android {
                     generatedAospCompatDir,
                 )
             )
-            res.setSrcDirs(
-                listOf(
-                    "res",
-                    "systemui-libs/iconloaderlib/res",
-                    "systemui-libs/animationlib/res",
-                )
-            )
+            res.setSrcDirs(listOf(generatedSystemUiResDir))
             assets.setSrcDirs(listOf("assets"))
             withGroovyBuilder {
                 getProperty("proto").withGroovyBuilder {
@@ -296,6 +448,7 @@ android {
         }
         named("trebuchet") {
             manifest.srcFile("AndroidManifest.xml")
+            res.setSrcDirs(listOf("res"))
         }
     }
 
@@ -345,19 +498,35 @@ kotlin {
     }
 }
 
-tasks.named("preBuild") {
-    dependsOn(syncSystemUiLibs, prepareMergedProtos, prepareSystemUiSources, generateAospCompatSources)
+tasks.matching {
+    it.name != syncSystemUiLibs.name &&
+        it.name != prepareSystemUiResources.name &&
+        it.name != prepareSystemUiSources.name &&
+        it.name != generateAospCompatSources.name &&
+        it.name != prepareMergedProtos.name &&
+        (it.name.startsWith("pre") ||
+            it.name.contains("Resources") ||
+            it.name.contains("SourceSetPaths") ||
+            it.name.contains("ResValues") ||
+            it.name.contains("Manifest") ||
+            it.name.contains("Aidl") ||
+            it.name.contains("Kapt") ||
+            it.name.contains("kapt"))
+}.configureEach {
+    dependsOn(syncSystemUiLibs, prepareSystemUiResources, prepareSystemUiSources, generateAospCompatSources, prepareMergedProtos)
 }
 
-tasks.withType<JavaCompile>().configureEach {
-    dependsOn(generateAospCompatSources, prepareSystemUiSources)
-    doFirst {
-        options.bootstrapClasspath = files(hiddenApiCompileOnly.files, options.bootstrapClasspath)
+gradle.projectsEvaluated {
+    tasks.withType<JavaCompile>().configureEach {
+        dependsOn(generateAospCompatSources, prepareSystemUiSources, prepareSystemUiResources)
+        options.bootstrapClasspath = files(hiddenApiCompileOnly, options.bootstrapClasspath)
     }
-}
 
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    dependsOn(generateAospCompatSources, prepareSystemUiSources)
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        dependsOn(generateAospCompatSources, prepareSystemUiSources, prepareSystemUiResources)
+        val orig = libraries.from.toList()
+        libraries.setFrom(hiddenApiCompileOnly, orig)
+    }
 }
 
 dependencies {
