@@ -384,7 +384,6 @@ android {
         targetSdk = 36
         versionCode = appVersionCode
         versionName = appVersionName
-        manifestPlaceholders["packageName"] = appId
     }
 
     flavorDimensions += "edition"
