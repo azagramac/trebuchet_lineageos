@@ -199,6 +199,7 @@ val prepareSystemUiResources by tasks.registering {
 val prepareMergedProtos by tasks.registering {
     dependsOn(syncSystemUiLibs)
     outputs.dir(mergedProtosDir)
+    outputs.upToDateWhen { false }
     doLast {
         val outDir = mergedProtosDir.get().asFile
         outDir.deleteRecursively()
@@ -208,12 +209,20 @@ val prepareMergedProtos by tasks.registering {
             file("protos"),
             file("protos_overrides"),
             file("quickstep/protos_overrides"),
-            File(systemUiRepoDir, "viewcapturelib/proto"),
         )
         protoDirs.filter { it.exists() }.forEach { dir ->
             dir.walkTopDown().filter { it.isFile && it.extension == "proto" }.forEach { protoFile ->
                 val rel = protoFile.relativeTo(dir).path
                 val dest = File(outDir, rel)
+                dest.parentFile.mkdirs()
+                protoFile.copyTo(dest, overwrite = true)
+            }
+        }
+
+        val viewCaptureDir = File(systemUiRepoDir, "viewcapturelib")
+        if (viewCaptureDir.exists()) {
+            viewCaptureDir.walkTopDown().filter { it.isFile && it.extension == "proto" }.forEach { protoFile ->
+                val dest = File(outDir, protoFile.name)
                 dest.parentFile.mkdirs()
                 protoFile.copyTo(dest, overwrite = true)
             }
@@ -276,6 +285,7 @@ val prepareSystemUiSources by tasks.registering {
 val generateAospCompatSources by tasks.registering {
     dependsOn(prepareSystemUiSources)
     outputs.dir(generatedAospCompatDir)
+    outputs.upToDateWhen { false }
     doLast {
         val outDir = generatedAospCompatDir.get().asFile
         outDir.deleteRecursively()
@@ -371,6 +381,157 @@ val generateAospCompatSources by tasks.registering {
         statsSb.appendLine("    public static void write(int code, Object... args) {}")
         statsSb.appendLine("}")
         File(statsDir, "SysUiStatsLog.java").writeText(statsSb.toString())
+
+        val taskbarDir = File(outDir, "com/android/launcher3/taskbar")
+        taskbarDir.mkdirs()
+        File(taskbarDir, "TaskbarManager.java").writeText(
+            """
+            package com.android.launcher3.taskbar;
+            import android.net.Uri;
+            import android.provider.Settings;
+            public final class TaskbarManager {
+                public static final Uri NAV_BAR_INVERSE = Settings.Secure.getUriFor("sysui_nav_bar_inverse");
+                public static final Uri ENABLE_TASKBAR = Settings.System.getUriFor("enable_taskbar");
+                public static final Uri NAVIGATION_BAR_HINT = Settings.System.getUriFor("navigation_bar_hint");
+                public static final Uri FORCE_SHOW_NAVBAR = Settings.System.getUriFor("force_show_navbar");
+            }
+            """.trimIndent()
+        )
+
+        val pluginsDir = File(outDir, "com/android/systemui/plugins")
+        pluginsDir.mkdirs()
+        File(pluginsDir, "Plugin.java").writeText(
+            """
+            package com.android.systemui.plugins;
+            import android.content.Context;
+            public interface Plugin {
+                default int getVersion() { return -1; }
+                default void onCreate(Context appContext, Context pluginContext) {}
+                default void onDestroy() {}
+            }
+            """.trimIndent()
+        )
+        File(pluginsDir, "PluginListener.java").writeText(
+            """
+            package com.android.systemui.plugins;
+            import android.content.Context;
+            public interface PluginListener<T extends Plugin> {
+                default void onPluginConnected(T plugin, Context pluginContext) {}
+                default void onPluginDisconnected(T plugin) {}
+                default boolean onPluginLoaded(T plugin, Context pluginContext, PluginLifecycleManager<T> manager) {
+                    onPluginConnected(plugin, pluginContext);
+                    return true;
+                }
+                default void onPluginUnloaded(T plugin, PluginLifecycleManager<T> manager) {
+                    onPluginDisconnected(plugin);
+                }
+            }
+            """.trimIndent()
+        )
+        File(pluginsDir, "PluginLifecycleManager.java").writeText(
+            """
+            package com.android.systemui.plugins;
+            import android.content.ComponentName;
+            public interface PluginLifecycleManager<T extends Plugin> {
+                ComponentName getComponentName();
+                String getPackage();
+                default T getPlugin() { return null; }
+                default void loadPlugin() {}
+                default void unloadPlugin() {}
+            }
+            """.trimIndent()
+        )
+        File(pluginsDir, "PluginManager.java").writeText(
+            """
+            package com.android.systemui.plugins;
+            public interface PluginManager {
+                String PLUGIN_CHANGED = "com.android.systemui.action.PLUGIN_CHANGED";
+                String NOTIFICATION_CHANNEL_ID = "ALR";
+                <T extends Plugin> void addPluginListener(PluginListener<T> listener, Class<T> cls);
+                <T extends Plugin> void addPluginListener(PluginListener<T> listener, Class<T> cls, boolean allowMultiple);
+                <T extends Plugin> void addPluginListener(String action, PluginListener<T> listener, Class<T> cls);
+                <T extends Plugin> void addPluginListener(String action, PluginListener<T> listener, Class<T> cls, boolean allowMultiple);
+                void removePluginListener(PluginListener<?> listener);
+                <T> boolean dependsOn(Plugin p, Class<T> cls);
+                String[] getPrivilegedPlugins();
+            }
+            """.trimIndent()
+        )
+
+        val pluginAnnotationsDir = File(outDir, "com/android/systemui/plugins/annotations")
+        pluginAnnotationsDir.mkdirs()
+        File(pluginAnnotationsDir, "ProvidesInterface.java").writeText(
+            """
+            package com.android.systemui.plugins.annotations;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            @Retention(RetentionPolicy.RUNTIME)
+            public @interface ProvidesInterface {
+                String action() default "";
+                int version();
+            }
+            """.trimIndent()
+        )
+        File(pluginAnnotationsDir, "Requires.java").writeText(
+            """
+            package com.android.systemui.plugins.annotations;
+            import java.lang.annotation.Repeatable;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            @Retention(RetentionPolicy.RUNTIME)
+            @Repeatable(Requirements.class)
+            public @interface Requires {
+                Class<?> target();
+                int version();
+            }
+            """.trimIndent()
+        )
+        File(pluginAnnotationsDir, "Requirements.java").writeText(
+            """
+            package com.android.systemui.plugins.annotations;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            @Retention(RetentionPolicy.RUNTIME)
+            public @interface Requirements {
+                Requires[] value();
+            }
+            """.trimIndent()
+        )
+        File(pluginAnnotationsDir, "DependsOn.java").writeText(
+            """
+            package com.android.systemui.plugins.annotations;
+            import java.lang.annotation.Repeatable;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            @Retention(RetentionPolicy.RUNTIME)
+            @Repeatable(Dependencies.class)
+            public @interface DependsOn {
+                Class<?> target();
+            }
+            """.trimIndent()
+        )
+        File(pluginAnnotationsDir, "Dependencies.java").writeText(
+            """
+            package com.android.systemui.plugins.annotations;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            @Retention(RetentionPolicy.RUNTIME)
+            public @interface Dependencies {
+                DependsOn[] value();
+            }
+            """.trimIndent()
+        )
+        File(pluginAnnotationsDir, "ProtectedInterface.java").writeText(
+            """
+            package com.android.systemui.plugins.annotations;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            @Retention(RetentionPolicy.RUNTIME)
+            public @interface ProtectedInterface {
+                String[] exTypes() default {};
+            }
+            """.trimIndent()
+        )
     }
 }
 
@@ -482,6 +643,7 @@ protobuf {
     generateProtoTasks {
         all().configureEach {
             dependsOn(prepareMergedProtos)
+            outputs.upToDateWhen { false }
             builtins {
                 id("java") {
                     option("lite")
