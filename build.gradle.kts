@@ -467,6 +467,97 @@ val generateAospCompatSources by tasks.registering {
             """.trimIndent()
         )
 
+        val lineageDir = File(outDir, "lineageos/providers")
+        lineageDir.mkdirs()
+        File(lineageDir, "LineageSettings.java").writeText(
+            """
+            package lineageos.providers;
+            import android.content.ContentResolver;
+            import android.net.Uri;
+            import android.provider.Settings;
+            public final class LineageSettings {
+                public static final class System {
+                    public static final Uri CONTENT_URI = Settings.System.CONTENT_URI;
+                    public static int getInt(ContentResolver cr, String name, int def) {
+                        return Settings.System.getInt(cr, name, def);
+                    }
+                    public static String getString(ContentResolver cr, String name) {
+                        return Settings.System.getString(cr, name);
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val msdlModelDir = File(outDir, "com/google/android/msdl/data/model")
+        msdlModelDir.mkdirs()
+        File(msdlModelDir, "MSDLToken.java").writeText(
+            """
+            package com.google.android.msdl.data.model;
+            public enum MSDLToken {
+                DRAG_INDICATOR_DISCRETE,
+                SWIPE_THRESHOLD_INDICATOR,
+                TAP_HIGH_EMPHASIS,
+                TAP_MEDIUM_EMPHASIS,
+                TAP_LOW_EMPHASIS,
+                KEYPRESS_STANDARD,
+                KEYPRESS_SPACEBAR,
+                KEYPRESS_DELETE,
+                KEYPRESS_RETURN,
+                LONG_PRESS,
+                DRAG_INDICATOR_CONTINUOUS,
+                FAILURE,
+                FAILURE_HIGH_EMPHASIS,
+                SUCCESS,
+                UNLOCK,
+                PAUSE_TIMER,
+                STOP_TIMER,
+                CANCEL,
+                SELECT
+            }
+            """.trimIndent()
+        )
+
+        val msdlLoggingDir = File(outDir, "com/google/android/msdl/logging")
+        msdlLoggingDir.mkdirs()
+        File(msdlLoggingDir, "MSDLEvent.java").writeText(
+            """
+            package com.google.android.msdl.logging;
+            public final class MSDLEvent {}
+            """.trimIndent()
+        )
+
+        val msdlDomainDir = File(outDir, "com/google/android/msdl/domain")
+        msdlDomainDir.mkdirs()
+        File(msdlDomainDir, "InteractionProperties.java").writeText(
+            """
+            package com.google.android.msdl.domain;
+            public interface InteractionProperties {}
+            """.trimIndent()
+        )
+        File(msdlDomainDir, "MSDLPlayer.java").writeText(
+            """
+            package com.google.android.msdl.domain;
+            import android.os.Vibrator;
+            import com.google.android.msdl.data.model.MSDLToken;
+            import com.google.android.msdl.logging.MSDLEvent;
+            import java.util.Collections;
+            import java.util.List;
+            import java.util.concurrent.Executor;
+            public interface MSDLPlayer {
+                void playToken(MSDLToken token, InteractionProperties properties);
+                default List<MSDLEvent> getHistory() { return Collections.emptyList(); }
+                final class Companion {
+                    private Companion() {}
+                    public MSDLPlayer createPlayer(Vibrator vibrator, Executor executor, Object feedbackLevel) {
+                        return (token, properties) -> {};
+                    }
+                }
+                Companion Companion = new Companion();
+            }
+            """.trimIndent()
+        )
+
         val pluginAnnotationsDir = File(outDir, "com/android/systemui/plugins/annotations")
         pluginAnnotationsDir.mkdirs()
         File(pluginAnnotationsDir, "ProvidesInterface.java").writeText(
@@ -690,6 +781,7 @@ tasks.matching {
 gradle.projectsEvaluated {
     tasks.withType<JavaCompile>().configureEach {
         dependsOn(generateAospCompatSources, prepareSystemUiSources, prepareSystemUiResources)
+        classpath = files(hiddenApiCompileOnly, classpath)
         options.bootstrapClasspath = files(hiddenApiCompileOnly, options.bootstrapClasspath)
     }
 
@@ -706,6 +798,7 @@ dependencies {
 
     implementation(files("libs/libGoogleFeed.jar"))
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.core:core-animation:1.0.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.annotation:annotation:1.9.1")
     implementation("androidx.constraintlayout:constraintlayout:2.2.0")
